@@ -1,0 +1,15 @@
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Build output
+/pulse
+/dist/
+
+# Local config
+.env
+*.local.yaml
+
+# Worktrees of the dev pipeline
+.worktrees/

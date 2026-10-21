@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.synthwerk.dev/events/envelope.v1.json",
+  "title": "Synthwerk CloudEvent envelope",
+  "description": "CloudEvents 1.0.2 in JSON format, with the Synthwerk rules and extensions. The data schema depends on `type` (see events/catalog.yaml).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specversion", "id", "source", "type", "time", "datacontenttype", "data"],
+  "properties": {
+    "specversion": {
+      "description": "CloudEvents spec version. 1.0.2 is a patch of 1.0, so the value is \"1.0\".",
+      "const": "1.0"
+    },
+    "id": {
+      "description": "UUIDv7. Also the Nats-Msg-Id for dedupe.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "source": {
+      "description": "/synthwerk/<service>/<env>.",
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^/synthwerk/[a-z][a-z0-9-]*/(local|dev|stg|prd)$"
+    },
+    "type": {
+      "description": "dev.synthwerk.<domain>.<entity>.<verb>.v<N>. The verb is in the past tense.",
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^dev\\.synthwerk\\.[a-z][a-z0-9]*\\.[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*\\.v[1-9][0-9]*$"
+    },
+    "subject": {
+      "description": "Id of the main entity, for example the conversation id.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "time": {
+      "description": "When the fact happened (RFC 3339). Producers send UTC.",
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    },
+    "datacontenttype": {
+      "const": "application/json"
+    },
+    "dataschema": {
+      "description": "The $id of the data schema.",
+      "type": "string",
+      "format": "uri",
+      "maxLength": 256
+    },
+    "tenantid": {
+      "description": "Extension. Tenant (customer org) the fact belongs to. Absent for platform facts.",
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "traceparent": {
+      "description": "Extension. W3C Trace Context of the request that caused the fact.",
+      "type": "string",
+      "pattern": "^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+    },
+    "actor": {
+      "description": "Extension. Who caused the fact: user:<sub>, service:<name> or system. Never an email or a name.",
+      "type": "string",
+      "maxLength": 140,
+      "pattern": "^(user:[A-Za-z0-9_-]{1,128}|service:[a-z][a-z0-9-]{0,62}|system)$"
+    },
+    "data": {
+      "description": "The fact. Validate it with the data schema of `type`.",
+      "type": "object"
+    }
+  }
+}

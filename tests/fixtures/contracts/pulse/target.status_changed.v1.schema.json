@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.synthwerk.dev/events/pulse/target.status_changed.v1.json",
+  "title": "pulse.target.status_changed.v1",
+  "description": "Pulse saw a new readiness status for a target. CloudEvents subject: the target name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target", "from", "to", "checks"],
+  "properties": {
+    "target": {
+      "description": "Name of the checked service, for example identity.",
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "from": {
+      "description": "Status before the change. unknown on the first check.",
+      "enum": ["unknown", "ok", "degraded", "down"]
+    },
+    "to": {
+      "description": "Status after the change.",
+      "enum": ["ok", "degraded", "down"]
+    },
+    "checks": {
+      "description": "Summary of the /readyz checks that caused the change.",
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_-]*$"
+          },
+          "status": {
+            "enum": ["ok", "degraded", "down"]
+          }
+        }
+      }
+    }
+  }
+}

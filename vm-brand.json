@@ -1,0 +1,12 @@
+{
+  "group": "flagship",
+  "tagline": "The platform watches itself. Every box gets a live tile.",
+  "sublabel": "HTTP · TCP · SSE · OUTBOX · NATS",
+  "bannerVersion": "v2",
+  "art": {
+    "file": "v2/flagship-base.png",
+    "seed": 303
+  },
+  "status": "DRAFT · M1",
+  "readme": "v3"
+}

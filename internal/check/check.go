@@ -36,7 +36,7 @@ type Result struct {
 	Status status.Status
 	// Checks are the checks of the /readyz body. Empty for tcp and for other bodies.
 	Checks []Item
-	// Latency is the time to the answer (or to the failure).
+	// Latency is the time to the response headers (or to the failure).
 	Latency time.Duration
 }
 
@@ -100,11 +100,15 @@ func (c httpChecker) Check(ctx context.Context) Result {
 		return down()
 	}
 	defer func() { _ = res.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(res.Body, maxBody))
+	latency := time.Since(start) // time to the response headers
+	// One byte more than the limit: a longer body is cut, so it is not read as /readyz.
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBody+1))
 	if err != nil && !errors.Is(err, io.EOF) {
 		return down()
 	}
-	latency := time.Since(start)
+	if len(body) > maxBody {
+		body = nil
+	}
 	if res.StatusCode >= http.StatusBadRequest {
 		r := Result{Status: status.Down, Latency: latency}
 		if rd, ok := parseReadiness(res.Header.Get("Content-Type"), body); ok {

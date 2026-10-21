@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,4 +127,15 @@ func closedAddr(t *testing.T) string {
 	addr := l.Addr().String()
 	_ = l.Close()
 	return addr
+}
+
+func TestHTTPCheckLargeBody(t *testing.T) {
+	t.Run("Check - readyz body over 64 KiB - not read as readyz, status from the code", func(t *testing.T) {
+		pad := strings.Repeat(" ", 64<<10)
+		url := serve(t, 200, "application/json", `{"status":"down","checks":[]}`+pad)
+		res := check.New(httpTarget(url), nil).Check(t.Context())
+		if res.Status != status.OK {
+			t.Fatalf("status %s, want ok (body ignored)", res.Status)
+		}
+	})
 }

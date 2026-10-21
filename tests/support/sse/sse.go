@@ -62,7 +62,10 @@ func (s *Stream) read(body io.Reader) {
 		case strings.HasPrefix(line, "event: "):
 			ev.Event = line[7:]
 		case strings.HasPrefix(line, "data: "):
-			ev.Data = line[6:]
+			if ev.Data != "" {
+				ev.Data += "\n"
+			}
+			ev.Data += line[6:]
 		}
 	}
 }

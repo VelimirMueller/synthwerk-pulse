@@ -92,7 +92,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 
 func (m *Monitor) loop(ctx context.Context, r *run) {
 	// Spread the first checks so that all targets do not fire at the same moment.
-	jitter := time.Duration(rand.Int64N(int64(r.target.Interval) / 10)) //nolint:gosec // jitter, not security.
+	jitter := time.Duration(rand.Int64N(max(1, int64(r.target.Interval)/10))) //nolint:gosec // jitter, not security.
 	select {
 	case <-ctx.Done():
 		return

@@ -224,14 +224,6 @@ func TestLiveStatus(t *testing.T) {
 	t.Cleanup(srv.Close)
 	t.Cleanup(a.Hub.Close)
 
-	ctx, cancel := context.WithCancel(t.Context())
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return a.Monitor.Run(gctx) })
-	g.Go(func() error { return a.Relay.Run(gctx) })
-	t.Cleanup(func() {
-		cancel()
-		_ = g.Wait()
-	})
 	a.Health.MarkStarted()
 
 	t.Run("readyz - postgres and nats up - 200", func(t *testing.T) {
@@ -246,10 +238,19 @@ func TestLiveStatus(t *testing.T) {
 		}
 	})
 
+	// Open the stream before the first check, so the first change is an event.
 	s := sse.Open(t, srv.URL+"/v1/health/stream")
 	if ev, _ := s.Next(t, 5*time.Second); ev.Event != "snapshot" {
 		t.Fatalf("first event %q, want snapshot", ev.Event)
 	}
+	ctx, cancel := context.WithCancel(t.Context())
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return a.Monitor.Run(gctx) })
+	g.Go(func() error { return a.Relay.Run(gctx) })
+	t.Cleanup(func() {
+		cancel()
+		_ = g.Wait()
+	})
 
 	t.Run("stream - target answers - status event unknown to ok", func(t *testing.T) {
 		ch := nextStatus(t, s, 5*time.Second)

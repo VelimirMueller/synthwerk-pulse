@@ -1,0 +1,193 @@
+{
+  "group": "flagship",
+  "version": "v2",
+  "dividers": [
+    {"key": "what", "index": "01", "title": "WHAT IT DOES", "caption": "ONE TILE PER TARGET.", "art": "strip-flagship-1"},
+    {"key": "start", "index": "02", "title": "QUICK START", "caption": "UP. CURL. WATCH.", "art": "strip-flagship-2"},
+    {"key": "how", "index": "03", "title": "HOW IT WORKS", "caption": "ONE LOST CHECK IS NOT RED.", "art": "strip-flagship-3"},
+    {"key": "usage", "index": "04", "title": "USAGE", "caption": "ROUTES, EVENTS, KNOBS.", "art": "strip-flagship-4"},
+    {"key": "status", "index": "05", "title": "STATUS", "caption": "DRAFT. THE M1 SKELETON.", "art": "strip-flagship-5"}
+  ],
+  "panels": [
+    {
+      "key": "lead", "type": "lead", "title": "ABOUT",
+      "text": "**synthwerk-pulse** is the platform's view of itself. It checks every service and infra part from `targets.yaml` and streams a stable status per target over Server-Sent Events."
+    },
+    {
+      "key": "stats", "type": "stats", "title": "THE NUMBERS",
+      "items": [
+        {"value": "2", "label": "CHECK KINDS: HTTP AND TCP"},
+        {"value": "30 s", "label": "LIMIT TO SHOW A STOPPED PART"},
+        {"value": "50", "label": "OPEN STREAMS PER PROCESS"},
+        {"value": "1", "label": "EVENT PER STORED CHANGE"}
+      ]
+    },
+    {
+      "key": "features", "type": "cards", "title": "THE PLATFORM, LIVE",
+      "items": [
+        {"title": "CHECK", "text": "Kind http sends GET to a URL. Kind tcp connects to host:port. One target per box."},
+        {"title": "HOLD", "text": "A status changes only after a run of equal results. One lost check stays green."},
+        {"title": "STREAM", "text": "Server-Sent Events: a snapshot first, then one event per change. A ping every 15 s."}
+      ]
+    },
+    {
+      "key": "what", "type": "notes", "title": "WHAT IT DOES", "columns": 2,
+      "items": [
+        {"lead": "Targets file", "text": "Pulse reads `SYNTHWERK_PULSE_TARGETS_FILE` at start. No API adds a target. Max 64 targets."},
+        {"lead": "http", "text": "A `/readyz` body from `openapi/_shared/health.yaml` gives status and checks. Other 2xx or 3xx is ok."},
+        {"lead": "down", "text": "A 4xx, a 5xx, a timeout or a refused connection is down. Pulse follows no redirect."},
+        {"lead": "tcp", "text": "Opens a TCP connection to `host:port`. For parts without a health endpoint, such as Postgres."},
+        {"lead": "Stored", "text": "The last status per target sits in `pulse_target_status`. The event goes to the outbox in the same transaction."},
+        {"lead": "Fast", "text": "Compose infra targets poll every 5 s. A stopped part shows as down in about 10 to 15 s."}
+      ]
+    },
+    {
+      "key": "start", "type": "terminal", "title": "QUICK START",
+      "lines": [
+        "# in synthwerk-infra",
+        "$ scripts/init-env.sh && docker compose up --wait",
+        "$ curl -N http://127.0.0.1:8080/pulse/v1/health/stream",
+        "event: snapshot",
+        "# stop a container: a status event says down"
+      ]
+    },
+    {
+      "key": "setup", "type": "commands", "title": "WORK ON PULSE",
+      "rows": [
+        {"cmd": "just test-unit", "text": "Status, check, target, stream and monitor tests in `tests/unit`. No Docker."},
+        {"cmd": "just test-int", "text": "Store, outbox and live status against real Postgres and NATS. Needs Docker."},
+        {"cmd": "just image", "text": "Build the container image as CI builds it."},
+        {"cmd": "just lint", "text": "gofmt, golangci-lint, actionlint and zizmor."}
+      ]
+    },
+    {
+      "key": "startnotes", "type": "notes", "columns": 2,
+      "items": [
+        {"lead": "Needs", "text": "Go 1.27. Docker for `just test-int` and `just image`. `just` runs the same commands as CI."},
+        {"lead": "Own targets", "text": "Start from `targets.example.yaml`. Set the targets file, database URL and NATS URL."}
+      ]
+    },
+    {
+      "key": "flow", "type": "flow", "title": "ONE CHECK, LEFT TO RIGHT",
+      "nodes": [
+        {"title": "TARGET", "sub": "http or tcp"},
+        {"title": "CHECK", "sub": "every 5 to 15 s"},
+        {"title": "HOLD", "sub": "hysteresis", "hot": true},
+        {"title": "STREAM", "sub": "SSE + outbox"}
+      ],
+      "caption": "A change goes to the open streams at once, also when Postgres is down."
+    },
+    {
+      "key": "how", "type": "notes", "title": "WHEN THE STATUS CHANGES",
+      "items": [
+        {"lead": "To down", "text": "After 2 down results in a row, from any status."},
+        {"lead": "Back up", "text": "From down to ok or degraded after 3 results in a row that are not down."},
+        {"lead": "Degraded", "text": "From ok to degraded at once. Back to ok after 2 ok results in a row."},
+        {"lead": "First", "text": "From unknown to ok or degraded after 1 result that is not down."},
+        {"lead": "Restart", "text": "No event again: pulse writes an event only when the stored status differs."}
+      ]
+    },
+    {
+      "key": "api", "type": "commands", "title": "THE ROUTES",
+      "rows": [
+        {"cmd": "GET /healthz", "text": "Liveness of the process."},
+        {"cmd": "GET /readyz", "text": "Readiness. `postgres` and `nats` are critical."},
+        {"cmd": "GET /v1/health", "text": "The snapshot as one JSON document."},
+        {"cmd": "GET /v1/health/stream", "text": "SSE: `snapshot` first, then `status` per change, `: ping` every 15 s. Max 50 streams, then 503. 1 h lifetime."},
+        {"cmd": "local edge", "text": "`http://127.0.0.1:8080/pulse/v1/health/stream`"}
+      ]
+    },
+    {
+      "key": "events", "type": "notes", "title": "THE EVENT",
+      "items": [
+        {"lead": "Type", "text": "`dev.synthwerk.pulse.target.status_changed.v1`, one per stored change."},
+        {"lead": "Path", "text": "Transactional outbox to NATS JetStream stream `EVT_PULSE`, with the Go kit from synthwerk-contracts `go/v0.1.0`."}
+      ]
+    },
+    {
+      "key": "config", "type": "commands", "title": "CONFIGURATION",
+      "rows": [
+        {"cmd": "SYNTHWERK_PULSE_DATABASE_URL", "text": "Postgres URL. Required. A secret: never in the repo."},
+        {"cmd": "SYNTHWERK_PULSE_NATS_URL", "text": "NATS JetStream URL."},
+        {"cmd": "SYNTHWERK_PULSE_TARGETS_FILE", "text": "The targets file. Read at start."},
+        {"cmd": "SYNTHWERK_PULSE_HTTP_ADDR", "text": "Listen address. Default `:8080`."},
+        {"cmd": "SYNTHWERK_PULSE_DEFAULT_INTERVAL", "text": "Check interval. Default `15s`. 1 s to 5 min."},
+        {"cmd": "SYNTHWERK_PULSE_DEFAULT_TIMEOUT", "text": "Check timeout. Default `3s`. Max the interval and 10 s."},
+        {"cmd": "SYNTHWERK_PULSE_SSE_MAX_CLIENTS", "text": "Max open streams. Default `50`."}
+      ]
+    },
+    {
+      "key": "config2", "type": "commands",
+      "rows": [
+        {"cmd": "SYNTHWERK_PLATFORM_ENV", "text": "Environment name, such as `local`."},
+        {"cmd": "SYNTHWERK_PULSE_LOG_LEVEL", "text": "Log level."},
+        {"cmd": "SYNTHWERK_PULSE_LOG_FORMAT", "text": "Log format."},
+        {"cmd": "OTEL_EXPORTER_OTLP_ENDPOINT", "text": "OTLP endpoint for traces, gRPC."}
+      ]
+    },
+    {
+      "key": "status", "type": "status", "title": "WHAT WORKS TODAY",
+      "rows": [
+        {"label": "http and tcp checks", "value": "beta", "state": "wip"},
+        {"label": "SSE stream and snapshot", "value": "beta", "state": "wip"},
+        {"label": "Status events via outbox", "value": "beta", "state": "wip"},
+        {"label": "Token check on the stream", "value": "with identity", "state": "planned"},
+        {"label": "Leader lock, sys.health fan-out", "value": "not yet", "state": "planned"},
+        {"label": "Incidents, metrics, KPIs, audit", "value": "not yet", "state": "planned"}
+      ]
+    },
+    {
+      "key": "now", "type": "notes", "columns": 2,
+      "items": [
+        {"lead": "No token yet", "text": "The local edge binds to `127.0.0.1`. The operator role check comes with identity."},
+        {"lead": "One process", "text": "No leader lock and no fan-out over `sys.health.>` yet."},
+        {"lead": "Shared database", "text": "Pulse uses `pulse_` tables in the shared database. Its own database comes with the infra module."},
+        {"lead": "Not yet", "text": "No incidents, metrics, alerts, KPIs or audit consumer."}
+      ]
+    },
+    {
+      "key": "checks", "type": "commands", "title": "TESTS AND CI",
+      "rows": [
+        {"cmd": "tests/unit", "text": "status, check, target, stream, monitor."},
+        {"cmd": "tests/integration", "text": "testcontainers Postgres + NATS: outbox events checked against the contract schemas, live down and up over SSE."},
+        {"cmd": "ci", "text": "Blueprint go-ci: gofmt, golangci-lint, `go test -race`, build."},
+        {"cmd": "image", "text": "Build, SBOM, Trivy. On main and tags: push to `ghcr.io/velimirmueller/synthwerk-pulse`, sign with cosign."},
+        {"cmd": "gate", "text": "One required check over all jobs."}
+      ]
+    },
+    {
+      "key": "links", "type": "buttons",
+      "items": [
+        {"label": "Feature doc", "sub": "live-status.md", "href": "docs/features/live-status.md"},
+        {"label": "Targets", "sub": "targets.example.yaml", "href": "targets.example.yaml"},
+        {"label": "Issue", "sub": "synthwerk#26", "href": "https://github.com/VelimirMueller/synthwerk/issues/26"},
+        {"label": "Contracts", "sub": "synthwerk-contracts", "href": "https://github.com/VelimirMueller/synthwerk-contracts"},
+        {"label": "Infra", "sub": "synthwerk-infra", "href": "https://github.com/VelimirMueller/synthwerk-infra"},
+        {"label": "Overview", "sub": "synthwerk", "href": "https://github.com/VelimirMueller/synthwerk"},
+        {"label": "Plain text", "sub": "show copyable commands"}
+      ]
+    },
+    {
+      "key": "footer", "type": "footer",
+      "studio": "VM. studio / flagship",
+      "text": "open source · look per vm-brand playbook · MIT (c) 2026 Velimir Mueller",
+      "eof": "-- EOF -- two bad checks, then red --"
+    }
+  ],
+  "readme": {
+    "hero_alt": "SYNTHWERK-PULSE. The platform watches itself. Every box gets a live tile. Draft, M1.",
+    "items": [
+      "lead", "stats",
+      "divider:what", "features", "what",
+      "divider:start", "start", "setup", "startnotes",
+      {"details": "links", "chip": 7, "code": [["bash", "# in synthwerk-infra\nscripts/init-env.sh && docker compose up --wait\ncurl -N http://127.0.0.1:8080/pulse/v1/health/stream\n\n# in synthwerk-pulse\njust test-unit    # unit tests, no Docker\njust test-int     # Postgres + NATS, needs Docker\njust image        # container image as CI builds it"]]},
+      {"buttons": "links", "only": [1, 2, 3]},
+      "divider:how", "flow", "how",
+      "divider:usage", "api", "events", "config", "config2",
+      {"buttons": "links", "only": [4, 5, 6]},
+      "divider:status", "status", "now", "checks",
+      {"details": "links", "chip": 7, "code": [["bash", "just lint         # gofmt, golangci-lint, actionlint, zizmor\njust test-unit    # go test -race ./tests/unit/...\njust test-int     # go test -tags integration -race ./tests/integration/..."]]},
+      "footer"
+    ]
+  }
+}

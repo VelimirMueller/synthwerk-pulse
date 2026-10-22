@@ -4,8 +4,8 @@
   "sublabel": "HTTP · TCP · SSE · OUTBOX · NATS",
   "bannerVersion": "v2",
   "art": {
-    "file": "v2/flagship-base.png",
-    "seed": 303
+    "file": "v2/synthwerk-pulse.png",
+    "seed": 325
   },
   "status": "DRAFT · M1",
   "readme": "v3"

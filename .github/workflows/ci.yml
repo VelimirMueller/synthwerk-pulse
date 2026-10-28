@@ -125,6 +125,8 @@ jobs:
 
   # The one required check. `skipped` passes only for e2e (dispatch only) and for a docs-only run
   # (code=false). With code=true every listed stage must be `success`; a skipped one fails here.
+  # A failed `changes` job fails the first loop (its result is `failure`), whatever CODE holds.
+  # A draft PR skips every job on purpose (CI-COST-10); ready_for_review starts the real run.
   conclusion:
     needs: [changes, lint, unit, e2e, build, integration]
     if: always()

@@ -79,9 +79,12 @@ jobs:
       - name: Record the stg approval
         run: echo "stg promotion approved"
 
-  # prd needs no e2e here: preflight lets prd take only the SHA that stage holds and that a green
-  # promote.yml stg run (with its e2e job) deployed. promote-* need their gate job: a skipped gate
-  # skips the promotion.
+  # prd needs no e2e here. fleet-workflows _promote-preflight.yml@v0.0.2 (target prd) sets
+  # sha = the stage head and fails with "no green promote.yml run deployed $sha to stg" unless a
+  # successful stg run of this workflow (e2e included) exists for that SHA. The only other prd
+  # path is a hotfix that main already holds. For stg-hotfix it fails unless stage is contained in
+  # main and takes sha = main, the SHA that prd already runs. promote-* need their gate job: a
+  # skipped gate skips the promotion.
   gate-prd:
     needs: [setup, preflight]
     if: needs.setup.outputs.env == 'prd'

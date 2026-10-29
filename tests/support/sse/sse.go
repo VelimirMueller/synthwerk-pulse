@@ -27,11 +27,20 @@ type Stream struct {
 // Open sends GET url and starts reading events. The stream closes when the test ends.
 func Open(t *testing.T, url string) *Stream {
 	t.Helper()
+	return OpenWith(t, url, nil)
+}
+
+// OpenWith is Open with request headers, for example Authorization.
+func OpenWith(t *testing.T, url string, header http.Header) *Stream {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for k, v := range header {
+		req.Header[k] = v
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {

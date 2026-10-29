@@ -20,8 +20,12 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/VelimirMueller/synthwerk-contracts/go/kit/auth"
+	"github.com/VelimirMueller/synthwerk-contracts/go/kit/auth/authtest"
+
 	"github.com/VelimirMueller/synthwerk-pulse/internal/app"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/check"
+	"github.com/VelimirMueller/synthwerk-pulse/internal/metrics"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/status"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/store"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/stream"
@@ -99,11 +103,24 @@ func events(t *testing.T, js jetstream.JetStream) []map[string]any {
 	return out
 }
 
+// issuer mints the tokens of the HTTP tests. adminHeader is an org admin.
+var issuer *authtest.Issuer
+
+func adminHeader(t *testing.T) http.Header {
+	t.Helper()
+	return http.Header{"Authorization": {"Bearer " + issuer.Mint(t, authtest.Claims("user-1", "org-1", auth.RoleAdmin))}}
+}
+
 func newApp(t *testing.T, targets []target.Target) *app.App {
 	t.Helper()
 	ctx := t.Context()
+	issuer = authtest.NewIssuer(t)
+	v, err := auth.NewVerifier(issuer.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
 	a, err := app.New(env.Database(t), env.NATS(t), slog.New(slog.DiscardHandler), app.Config{
-		Version: "0.1.0", Commit: "3f9c2e1", Env: "ci", Targets: targets,
+		Version: "0.1.0", Commit: "3f9c2e1", Env: "ci", Targets: targets, Verifier: v,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +256,7 @@ func TestLiveStatus(t *testing.T) {
 	})
 
 	// Open the stream before the first check, so the first change is an event.
-	s := sse.Open(t, srv.URL+"/v1/health/stream")
+	s := sse.OpenWith(t, srv.URL+"/v1/health/stream", adminHeader(t))
 	if ev, _ := s.Next(t, 5*time.Second); ev.Event != "snapshot" {
 		t.Fatalf("first event %q, want snapshot", ev.Event)
 	}
@@ -297,6 +314,7 @@ func TestLiveStatus(t *testing.T) {
 
 	t.Run("GET /v1/health - after the changes - identity ok", func(t *testing.T) {
 		req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/v1/health", nil)
+		req.Header = adminHeader(t)
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -308,6 +326,90 @@ func TestLiveStatus(t *testing.T) {
 		}
 		if len(snap.Targets) != 1 || snap.Targets[0].Status != status.OK || snap.Targets[0].CheckedAt == nil {
 			t.Fatalf("snapshot %+v, want identity ok and checked", snap)
+		}
+	})
+}
+
+//nolint:contextcheck // the helpers take their context from t.
+func TestMetrics(t *testing.T) {
+	a := newApp(t, nil)
+	ctx := t.Context()
+	llm, err := a.JS.CreateStream(ctx, jetstream.StreamConfig{Name: metrics.LLMStream, Subjects: []string{"evt.llm.>"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.JS.DeleteStream(context.Background(), metrics.LLMStream) })
+	// A durable consumer that never reads: its messages stay pending.
+	if _, err := llm.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{Durable: "slow-reader", AckPolicy: jetstream.AckExplicitPolicy}); err != nil {
+		t.Fatal(err)
+	}
+	publish := func(org string, tokens, latency int) {
+		t.Helper()
+		ev := fmt.Sprintf(`{"specversion":"1.0","id":"%s-%d","source":"/synthwerk/llm/ci","type":"dev.synthwerk.llm.message.completed.v1","time":%q,"orgid":%q,`+
+			`"datacontenttype":"application/json","data":{"input_tokens":%d,"output_tokens":0,"latency_ms":%d,"status":"completed"}}`,
+			org, tokens, time.Now().UTC().Format(time.RFC3339Nano), org, tokens, latency)
+		if _, err := a.JS.Publish(ctx, metrics.LLMSubject, []byte(ev)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish("org-a", 500, 120)
+	publish("org-b", 5000, 900)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- a.Metrics.Run(runCtx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	t.Run("AI - events on EVT_LLM - tokens and latency per org", func(t *testing.T) {
+		var org metrics.Org
+		for range 100 {
+			if org = a.Metrics.Org("org-a"); org.AI != nil && org.AI.Answers == 1 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if org.AI == nil || org.AI.Answers != 1 || org.AI.TokensPerMinute != 100 || *org.AI.LatencyP95Ms != 120 {
+			t.Fatalf("org-a %+v, want 1 answer, 100 tokens/min, p95 120", org.AI)
+		}
+	})
+
+	t.Run("AI - a new event while running - counted at once", func(t *testing.T) {
+		publish("org-a", 1000, 300)
+		var org metrics.Org
+		for range 100 {
+			if org = a.Metrics.Org("org-a"); org.AI.Answers == 2 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if org.AI.Answers != 2 || org.AI.TokensPerMinute != 300 {
+			t.Fatalf("org-a %+v, want 2 answers, 300 tokens/min", org.AI)
+		}
+	})
+
+	t.Run("Platform - real Postgres and NATS - connections and pending messages", func(t *testing.T) {
+		a.Metrics.Refresh(ctx)
+		p := a.Metrics.Platform()
+		if p.Database == nil || p.Database.Connections < 1 || p.Database.MaxConnections < p.Database.Connections {
+			t.Fatalf("database %+v, want at least one connection", p.Database)
+		}
+		if p.Bus == nil {
+			t.Fatal("bus null")
+		}
+		var got *metrics.Stream
+		for i := range p.Bus.Streams {
+			if p.Bus.Streams[i].Stream == metrics.LLMStream {
+				got = &p.Bus.Streams[i]
+			}
+		}
+		if got == nil || got.Messages != 3 || got.Pending != 3 || p.Bus.PendingMessages < 3 {
+			t.Fatalf("bus %+v, want EVT_LLM with 3 messages, 3 pending", p.Bus)
+		}
+		if p.AI == nil || p.AI.Answers != 3 {
+			t.Fatalf("ai %+v, want 3 answers over every org", p.AI)
 		}
 	})
 }

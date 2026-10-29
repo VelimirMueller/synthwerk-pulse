@@ -8,7 +8,7 @@ paths: ["cmd/pulse/**", "internal/**", "targets.example.yaml"]
 api: ["GET /v1/health", "GET /v1/health/stream", "GET /healthz", "GET /readyz"]
 events: ["dev.synthwerk.pulse.target.status_changed.v1"]
 mcp: []
-updated: 2026-10-21
+updated: 2026-10-30
 ---
 
 # Live status per service
@@ -45,7 +45,7 @@ updated: 2026-10-21
 1. Write a targets file. Start from `targets.example.yaml`.
 2. Set `SYNTHWERK_PULSE_TARGETS_FILE`, `SYNTHWERK_PULSE_DATABASE_URL` and `SYNTHWERK_PULSE_NATS_URL`.
 3. Start pulse. The synthwerk-infra compose stack does this for you.
-4. Open the stream: `curl -N http://127.0.0.1:8080/pulse/v1/health/stream` (through the local edge).
+4. Open the stream with a token of an operator, owner or admin: `curl -N -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/pulse/v1/health/stream` (through the local edge).
 5. Read the first `snapshot` event for the full state. Then apply each `status` event.
 
 Stream format (`text/event-stream`):
@@ -100,14 +100,15 @@ data: {"target":"bus","from":"ok","status":"down","since":"2026-10-21T08:02:15Z"
 
 | Status | Problem type | Cause |
 |---|---|---|
+| 401 | `about:blank`, code `unauthenticated` | No Bearer token, or the token is not valid. See [health-metrics.md](health-metrics.md). |
+| 403 | `about:blank`, code `forbidden` | The token has no `operator`, `owner` or `admin` role. |
 | 503 | none (plain text) | `/v1/health/stream`: the max number of streams is open, or pulse is shutting down. |
 | 503 | none (body is `Readiness`) | `/readyz`: startup is not complete, or Postgres or NATS is down. |
 
 ## Not in M1
 
-- No token check on `/v1/health` and the stream yet. The local edge is bound to `127.0.0.1`. Operator role checks come with identity (E3).
 - One pulse process only: no leader lock and no fan-out over `sys.health.>` yet.
-- No incidents, metrics, alerts or KPIs. No audit consumer yet: the audit event names are still open.
+- No incidents, alerts or KPIs. No audit consumer yet: the audit event names are still open. Metrics: [health-metrics.md](health-metrics.md).
 - Pulse uses the shared database with `pulse_` tables. Its own database and role come with the infra module.
 
 ## Tests
@@ -130,3 +131,4 @@ data: {"target":"bus","from":"ok","status":"down","since":"2026-10-21T08:02:15Z"
 | Date | Change |
 |---|---|
 | 2026-10-21 | First version: targets file, http and tcp checks, hysteresis, SSE stream, status events through the outbox. |
+| 2026-10-30 | `/v1/health` and the stream need a token of an operator, owner or admin (synthwerk#40). |

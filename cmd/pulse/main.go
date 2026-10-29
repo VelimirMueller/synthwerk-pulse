@@ -14,6 +14,15 @@
 //	SYNTHWERK_PULSE_DEFAULT_INTERVAL     check interval of a target that sets none, default 15s
 //	SYNTHWERK_PULSE_DEFAULT_TIMEOUT      check timeout of a target that sets none, default 3s
 //	SYNTHWERK_PULSE_SSE_MAX_CLIENTS      max open streams, default 50
+//	SYNTHWERK_PULSE_OIDC_ISSUER          token issuer (required), for example http://auth.localhost:8080
+//	SYNTHWERK_PULSE_OIDC_AUDIENCE        accepted audiences, comma separated, default synthwerk-api
+//	SYNTHWERK_PULSE_JWKS_URL             key set URL; empty = OIDC discovery on the issuer
+//	SYNTHWERK_PULSE_PLATFORM_ORG_ID      Zitadel org that grants operator. Empty = nobody is operator.
+//	SYNTHWERK_PULSE_PROMETHEUS_URL       Prometheus with the edge metrics, for example http://telemetry:9090. Empty = no service numbers.
+//	SYNTHWERK_PULSE_PROC_DIR             proc dir for host CPU and memory, default /proc
+//	SYNTHWERK_PULSE_DISK_PATH            path whose file system is the host disk, default /
+//	SYNTHWERK_PULSE_METRICS_WINDOW       window of rates, p95 and AI numbers, default 5m
+//	SYNTHWERK_PULSE_METRICS_INTERVAL     refresh of the platform numbers, default 10s
 //	SYNTHWERK_PULSE_LOG_LEVEL            DEBUG, INFO (default), WARN, ERROR
 //	SYNTHWERK_PULSE_LOG_FORMAT           json (default) or console (local only)
 //	OTEL_EXPORTER_OTLP_ENDPOINT          collector (gRPC), for example http://telemetry:4317. Unset = no export.
@@ -33,6 +42,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,11 +50,13 @@ import (
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/VelimirMueller/synthwerk-contracts/go/kit/auth"
 	"github.com/VelimirMueller/synthwerk-contracts/go/kit/env"
 	kitlog "github.com/VelimirMueller/synthwerk-contracts/go/kit/log"
 	kitotel "github.com/VelimirMueller/synthwerk-contracts/go/kit/otel"
 
 	"github.com/VelimirMueller/synthwerk-pulse/internal/app"
+	"github.com/VelimirMueller/synthwerk-pulse/internal/metrics"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/stream"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/target"
 )
@@ -162,6 +174,7 @@ func run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return a.Relay.Run(gctx) })
 	g.Go(func() error { return a.Monitor.Run(gctx) })
+	g.Go(func() error { return a.Metrics.Run(gctx) })
 	g.Go(func() error {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
@@ -196,13 +209,66 @@ func config(platform string) (app.Config, error) {
 	if err != nil || maxClients < 1 || maxClients > 10000 {
 		return app.Config{}, errors.New(env.Key(app.Service, "SSE_MAX_CLIENTS") + " must be 1 to 10000")
 	}
+	verifier, err := verifierConfig()
+	if err != nil {
+		return app.Config{}, err
+	}
+	mcfg, err := metricsConfig()
+	if err != nil {
+		return app.Config{}, err
+	}
 	return app.Config{
-		Version: version,
-		Commit:  commit,
-		Env:     platform,
-		Targets: targets,
-		Stream:  stream.Config{MaxClients: maxClients},
+		Version:  version,
+		Commit:   commit,
+		Env:      platform,
+		Targets:  targets,
+		Stream:   stream.Config{MaxClients: maxClients},
+		Verifier: verifier,
+		Metrics:  mcfg,
 	}, nil
+}
+
+func verifierConfig() (*auth.Verifier, error) {
+	issuer := env.Get(app.Service, "OIDC_ISSUER", "")
+	if issuer == "" {
+		return nil, errors.New(env.Key(app.Service, "OIDC_ISSUER") + " is required")
+	}
+	var audiences []string
+	for a := range strings.SplitSeq(env.Get(app.Service, "OIDC_AUDIENCE", "synthwerk-api"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			audiences = append(audiences, a)
+		}
+	}
+	return auth.NewVerifier(auth.Config{
+		Issuer:    issuer,
+		Audiences: audiences,
+		JWKSURL:   env.Get(app.Service, "JWKS_URL", ""),
+		Mapper:    auth.ZitadelMapper{PlatformOrgID: env.Get(app.Service, "PLATFORM_ORG_ID", "")},
+	})
+}
+
+func metricsConfig() (metrics.Config, error) {
+	var c metrics.Config
+	var err error
+	if c.Window, err = duration("METRICS_WINDOW", 5*time.Minute); err != nil {
+		return c, err
+	}
+	if c.Window < time.Minute || c.Window > time.Hour {
+		return c, errors.New(env.Key(app.Service, "METRICS_WINDOW") + " must be 1m to 1h")
+	}
+	if c.Interval, err = duration("METRICS_INTERVAL", 10*time.Second); err != nil {
+		return c, err
+	}
+	if c.Interval < time.Second || c.Interval > 5*time.Minute {
+		return c, errors.New(env.Key(app.Service, "METRICS_INTERVAL") + " must be 1s to 5m")
+	}
+	if u := env.Get(app.Service, "PROMETHEUS_URL", ""); u != "" {
+		if c.Prom, err = metrics.NewPrometheus(u, nil); err != nil {
+			return c, err
+		}
+	}
+	c.Host = metrics.NewHostSampler(env.Get(app.Service, "PROC_DIR", "/proc"), env.Get(app.Service, "DISK_PATH", "/"))
+	return c, nil
 }
 
 func duration(name string, def time.Duration) (time.Duration, error) {

@@ -72,7 +72,7 @@
 ```bash
 # in synthwerk-infra
 scripts/init-env.sh && docker compose up --wait
-curl -N http://127.0.0.1:8080/pulse/v1/health/stream
+curl -N -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/pulse/v1/health/stream  # operator, owner or admin
 
 # in synthwerk-pulse
 just test-unit    # unit tests, no Docker

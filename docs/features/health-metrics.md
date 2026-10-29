@@ -113,6 +113,8 @@ updated: 2026-10-30
 - `tests/unit/metrics/metrics_test.go` — `Stats - one org - only the answers of that org`
 - `tests/unit/metrics/metrics_test.go` — `Sample - two samples - CPU share between them, memory and disk`
 - `tests/unit/metrics/metrics_test.go` — `Services - edge metrics - rate, error share and p95 per service`
+- `tests/unit/metrics/nats_test.go` — `RunAI - stream deleted - AI unavailable`
+- `tests/unit/metrics/nats_test.go` — `Refresh - stream with a slow consumer - pending messages`
 - `tests/integration/pulse/pulse_test.go` — `AI - events on EVT_LLM - tokens and latency per org`
 - `tests/integration/pulse/pulse_test.go` — `Platform - real Postgres and NATS - connections and pending messages`
 

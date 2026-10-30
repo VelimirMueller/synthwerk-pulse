@@ -1,5 +1,5 @@
-// Package app wires pulse: health probes, the live status endpoints, the monitor,
-// the store and the outbox relay. It starts from the example service of the
+// Package app wires pulse: health probes, the live status and metrics endpoints behind
+// the token check, the monitor, the metrics collector, the store and the outbox relay. It starts from the example service of the
 // synthwerk-contracts Go kit (go/examples/service).
 package app
 
@@ -16,11 +16,13 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/VelimirMueller/synthwerk-contracts/go/kit/auth"
 	"github.com/VelimirMueller/synthwerk-contracts/go/kit/cloudevents"
 	"github.com/VelimirMueller/synthwerk-contracts/go/kit/health"
 	kitlog "github.com/VelimirMueller/synthwerk-contracts/go/kit/log"
 	"github.com/VelimirMueller/synthwerk-contracts/go/kit/outbox"
 
+	"github.com/VelimirMueller/synthwerk-pulse/internal/metrics"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/monitor"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/store"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/stream"
@@ -40,6 +42,10 @@ type Config struct {
 	Stream  stream.Config
 	// Monitor options (tests).
 	MonitorOptions []monitor.Option
+	// Verifier checks the Bearer token of every /v1 request. Required.
+	Verifier *auth.Verifier
+	// Metrics sources and timing. DB and JS are set by New.
+	Metrics metrics.Config
 }
 
 // App holds the dependencies of the service.
@@ -52,12 +58,16 @@ type App struct {
 	Store   *store.Store
 	Hub     *stream.Hub
 	Monitor *monitor.Monitor
+	Metrics *metrics.Collector
 	Relay   *outbox.Relay
 	handler http.Handler
 }
 
-// New wires the app. Call Migrate, then Health.MarkStarted, then run Monitor and Relay.
+// New wires the app. Call Migrate, then Health.MarkStarted, then run Monitor, Metrics and Relay.
 func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App, error) {
+	if cfg.Verifier == nil {
+		return nil, errors.New("app: a token verifier is required")
+	}
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, fmt.Errorf("app: jetstream: %w", err)
@@ -74,6 +84,7 @@ func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App
 			}
 			return nil
 		}},
+		health.Check{Name: "jwks", Run: cfg.Verifier.Ready, Detail: "token keys unavailable"},
 	)
 	if err != nil {
 		return nil, err
@@ -89,12 +100,14 @@ func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App
 	st := store.New(db, source)
 	hub := stream.New(names, time.Now(), cfg.Stream)
 	mon := monitor.New(cfg.Targets, hub, st, logger, cfg.MonitorOptions...)
-	a := &App{DB: db, NC: nc, JS: js, Log: logger, Health: h, Store: st, Hub: hub, Monitor: mon, Relay: relay}
+	mcfg := cfg.Metrics
+	mcfg.DB, mcfg.JS = db, js
+	col := metrics.New(mcfg, logger)
+	a := &App{DB: db, NC: nc, JS: js, Log: logger, Health: h, Store: st, Hub: hub, Monitor: mon, Metrics: col, Relay: relay}
 
 	mux := http.NewServeMux()
 	h.Register(mux)
-	mux.HandleFunc("GET /v1/health", hub.ServeSnapshot)
-	mux.HandleFunc("GET /v1/health/stream", hub.ServeStream)
+	mux.Handle("/v1/", API(cfg.Verifier, hub, col))
 	// The log line sits inside the span. Probes and the long-lived stream create no span.
 	a.handler = otelhttp.NewHandler(kitlog.HTTP(logger, mux), Service,
 		otelhttp.WithFilter(func(r *http.Request) bool {
@@ -105,6 +118,22 @@ func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App
 			return true
 		}))
 	return a, nil
+}
+
+// API returns the /v1 routes. Every route needs a token (docs/features/health-metrics.md).
+//
+//   - GET /v1/health and /v1/health/stream: operators and the owners and admins of any
+//     org. The status of platform parts holds no org data.
+//   - GET /v1/metrics: operators only. The numbers cover every org.
+//   - GET /v1/orgs/{org}/metrics: the owners and admins of that org, or operators.
+func API(v *auth.Verifier, hub *stream.Hub, col *metrics.Collector) http.Handler {
+	viewer := auth.RequireRole(metrics.ViewerRoles...)
+	api := http.NewServeMux()
+	api.Handle("GET /v1/health", viewer(http.HandlerFunc(hub.ServeSnapshot)))
+	api.Handle("GET /v1/health/stream", viewer(http.HandlerFunc(hub.ServeStream)))
+	api.Handle("GET /v1/metrics", auth.RequireRole(auth.RoleOperator)(http.HandlerFunc(col.ServePlatform)))
+	api.HandleFunc("GET /v1/orgs/{org}/metrics", col.ServeOrg)
+	return auth.Middleware(v, api)
 }
 
 // Handler is the HTTP handler of the service.

@@ -26,9 +26,11 @@ import (
 	"github.com/VelimirMueller/synthwerk-pulse/internal/alert"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/metrics"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/monitor"
+	"github.com/VelimirMueller/synthwerk-pulse/internal/public"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/store"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/stream"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/target"
+	"github.com/VelimirMueller/synthwerk-pulse/internal/uptime"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/usage"
 )
 
@@ -68,6 +70,8 @@ type App struct {
 	Metrics *metrics.Collector
 	Alerts  *alert.Engine
 	Usage   *usage.Store
+	Uptime  *uptime.Store
+	Public  *public.Service
 	Relay   *outbox.Relay
 	handler http.Handler
 }
@@ -123,11 +127,22 @@ func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App
 	acfg.Targets = func() []stream.Target { return hub.Snapshot().Targets }
 	acfg.Prom, acfg.AI = cfg.Metrics.Prom, col.AI()
 	alerts := alert.New(acfg, logger)
+	up := uptime.NewStore(db, cfg.Metrics.Now)
+	src := public.Sources{Uptime: up.Ratio, Answered: use.AnsweredChats, Now: cfg.Metrics.Now}
+	if prom := cfg.Metrics.Prom; prom != nil {
+		src.P95 = func(ctx context.Context, w time.Duration) (float64, bool, error) {
+			return prom.EdgeP95(ctx, w, Service)
+		}
+	}
+	pub := public.New(src, logger)
 	a := &App{DB: db, NC: nc, JS: js, Log: logger, Health: h, Store: st, Hub: hub, Monitor: mon,
-		Metrics: col, Alerts: alerts, Usage: use, Relay: relay}
+		Metrics: col, Alerts: alerts, Usage: use, Uptime: up, Public: pub, Relay: relay}
 
 	mux := http.NewServeMux()
 	h.Register(mux)
+	// Public numbers of the site (synthwerk#47): no token, cached, aggregates only. The more
+	// specific pattern wins over "/v1/", so the token check does not apply.
+	mux.Handle("GET /v1/public-stats", pub)
 	mux.Handle("/v1/", API(cfg.Verifier, hub, col, alerts))
 	// The log line sits inside the span. Probes and the long-lived stream create no span.
 	a.handler = otelhttp.NewHandler(kitlog.HTTP(logger, mux), Service,
@@ -147,6 +162,7 @@ func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App
 //     org. The status of platform parts holds no org data.
 //   - GET /v1/metrics: operators only. The numbers cover every org.
 //   - GET /v1/orgs/{org}/metrics: the owners and admins of that org, or operators.
+//   - GET /v1/public-stats (registered in New, outside this handler): no token.
 //   - GET /v1/alerts: operators and the owners and admins of any org. Only operators get
 //     the trace links (docs/features/alerts-and-cost.md).
 func API(v *auth.Verifier, hub *stream.Hub, col *metrics.Collector, alerts *alert.Engine) http.Handler {
@@ -168,7 +184,15 @@ func (a *App) Migrate(ctx context.Context) error {
 	if err := a.Store.Migrate(ctx); err != nil {
 		return err
 	}
+	if err := a.Uptime.Migrate(ctx); err != nil {
+		return err
+	}
 	return a.Usage.Migrate(ctx)
+}
+
+// RunUptime stores the uptime of every target once per minute until ctx ends.
+func (a *App) RunUptime(ctx context.Context) error {
+	return uptime.Run(ctx, a.Uptime, func() []stream.Target { return a.Hub.Snapshot().Targets }, time.Minute, a.Log)
 }
 
 // RunUsage counts the llm answers for the AI cost per day until ctx ends.

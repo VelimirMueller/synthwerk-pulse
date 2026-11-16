@@ -1,5 +1,7 @@
 // Command pulse checks the health of every Synthwerk service and infra part and
 // streams the status over Server-Sent Events. See docs/features/live-status.md.
+// It also serves alerts, the AI cost and the public numbers of the site
+// (docs/features/alerts-and-cost.md, docs/features/public-stats.md).
 //
 //	pulse              run the service
 //	pulse healthcheck  exit 0 when /readyz answers 200 (container health check)
@@ -183,6 +185,7 @@ func run(ctx context.Context) error {
 	g.Go(func() error { return a.Metrics.Run(gctx) })
 	g.Go(func() error { return a.Alerts.Run(gctx) })
 	g.Go(func() error { return a.RunUsage(gctx) })
+	g.Go(func() error { return a.RunUptime(gctx) })
 	g.Go(func() error {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err

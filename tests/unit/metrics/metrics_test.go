@@ -368,3 +368,33 @@ func TestAICost(t *testing.T) {
 		}
 	})
 }
+
+func TestEdgeP95(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{"service":"all"},"value":[1,"0.4125"]}]}}`))
+	}))
+	t.Cleanup(srv.Close)
+	prom, err := metrics.NewPrometheus(srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("EdgeP95 - every service but pulse - ms over the window", func(t *testing.T) {
+		v, ok, err := prom.EdgeP95(t.Context(), 24*time.Hour, "pulse")
+		if err != nil || !ok || v != 412.5 {
+			t.Fatalf("v %v ok %v err %v", v, ok, err)
+		}
+		want := `label_replace(histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service!~"(pulse)@.*"}[86400s]))), "service", "all", "", "")`
+		if got != want {
+			t.Fatalf("query %q", got)
+		}
+	})
+
+	t.Run("EdgeP95 - unsafe skip name - error", func(t *testing.T) {
+		if _, _, err := prom.EdgeP95(t.Context(), time.Hour, `x"}`); err == nil {
+			t.Fatal("accepted")
+		}
+	})
+}

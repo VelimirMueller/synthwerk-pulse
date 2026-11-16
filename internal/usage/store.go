@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS pulse_ai_usage_seen (
     message_id  text PRIMARY KEY,
     day         date NOT NULL
 );
-CREATE INDEX IF NOT EXISTS pulse_ai_usage_seen_day ON pulse_ai_usage_seen (day);`
+CREATE INDEX IF NOT EXISTS pulse_ai_usage_seen_day ON pulse_ai_usage_seen (day);
+ALTER TABLE pulse_ai_usage_daily ADD COLUMN IF NOT EXISTS completed bigint NOT NULL DEFAULT 0;`
 
 // ErrBadEvent is an event that can never be counted. The consumer terminates it.
 var ErrBadEvent = errors.New("usage: event without org id, time, message id or valid numbers")
@@ -74,6 +75,7 @@ type event struct {
 		Provider     string `json:"provider"`
 		InputTokens  int64  `json:"input_tokens"`
 		OutputTokens int64  `json:"output_tokens"`
+		Status       string `json:"status"`
 	} `json:"data"`
 }
 
@@ -86,6 +88,8 @@ type Answer struct {
 	Model        string
 	InputTokens  int64
 	OutputTokens int64
+	// Completed is true for status completed: an answered chat (public numbers, synthwerk#47).
+	Completed bool
 }
 
 // ParseAnswer reads one llm.message.completed.v1 CloudEvent. It returns ErrBadEvent
@@ -103,7 +107,7 @@ func ParseAnswer(raw []byte) (Answer, error) {
 	}
 	return Answer{
 		MessageID: d.MessageID, Day: today(e.Time), OrgID: e.OrgID, Provider: d.Provider, Model: d.Model,
-		InputTokens: d.InputTokens, OutputTokens: d.OutputTokens,
+		InputTokens: d.InputTokens, OutputTokens: d.OutputTokens, Completed: d.Status == "completed",
 	}, nil
 }
 
@@ -130,13 +134,14 @@ func (s *Store) Record(ctx context.Context, raw []byte) (bool, error) {
 		return false, nil
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO pulse_ai_usage_daily (day, org_id, provider, model, answers, input_tokens, output_tokens)
-		VALUES ($1, $2, $3, $4, 1, $5, $6)
+		INSERT INTO pulse_ai_usage_daily (day, org_id, provider, model, answers, input_tokens, output_tokens, completed)
+		VALUES ($1, $2, $3, $4, 1, $5, $6, $7)
 		ON CONFLICT (day, org_id, provider, model) DO UPDATE
 		SET answers = pulse_ai_usage_daily.answers + 1,
 		    input_tokens = pulse_ai_usage_daily.input_tokens + EXCLUDED.input_tokens,
-		    output_tokens = pulse_ai_usage_daily.output_tokens + EXCLUDED.output_tokens`,
-		a.Day, a.OrgID, a.Provider, a.Model, a.InputTokens, a.OutputTokens); err != nil {
+		    output_tokens = pulse_ai_usage_daily.output_tokens + EXCLUDED.output_tokens,
+		    completed = pulse_ai_usage_daily.completed + EXCLUDED.completed`,
+		a.Day, a.OrgID, a.Provider, a.Model, a.InputTokens, a.OutputTokens, completed(a)); err != nil {
 		return false, fmt.Errorf("usage: count: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -227,3 +232,24 @@ func BuildCost(prices Prices, now time.Time, list []Usage) metrics.AICost {
 
 // today is the start of the UTC day of t.
 func today(t time.Time) time.Time { return t.UTC().Truncate(24 * time.Hour) }
+
+func completed(a Answer) int64 {
+	if a.Completed {
+		return 1
+	}
+	return 0
+}
+
+// AnsweredChats counts the completed answers of every org in the last days UTC days,
+// today included.
+func (s *Store) AnsweredChats(ctx context.Context, days int) (int64, error) {
+	if days < 1 {
+		return 0, fmt.Errorf("usage: days must be 1 or more, got %d", days)
+	}
+	from := today(s.now()).AddDate(0, 0, -(days - 1))
+	var n int64
+	if err := s.db.QueryRow(ctx, `SELECT coalesce(sum(completed), 0)::bigint FROM pulse_ai_usage_daily WHERE day >= $1`, from).Scan(&n); err != nil {
+		return 0, fmt.Errorf("usage: answered chats: %w", err)
+	}
+	return n, nil
+}

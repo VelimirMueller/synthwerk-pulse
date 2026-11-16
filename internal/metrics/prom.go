@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -162,3 +163,27 @@ func (p *Prometheus) EdgeCounts(ctx context.Context, window time.Duration) (map[
 	}
 	return out, nil
 }
+
+// EdgeP95 returns the p95 in milliseconds of every edge request in the last window,
+// except the services in skip (for example pulse, whose health stream lives up to 1 h).
+// ok is false without traffic.
+func (p *Prometheus) EdgeP95(ctx context.Context, window time.Duration, skip ...string) (float64, bool, error) {
+	w := strconv.Itoa(int(window.Seconds())) + "s"
+	sel := edgeDuration
+	if len(skip) > 0 {
+		for _, s := range skip {
+			if !serviceLabelRE.MatchString(s) {
+				return 0, false, fmt.Errorf("metrics: service name %q is not safe in a query", s)
+			}
+		}
+		sel += fmt.Sprintf(`{service!~"(%s)@.*"}`, strings.Join(skip, "|"))
+	}
+	out, err := p.query(ctx, fmt.Sprintf(`label_replace(histogram_quantile(0.95, sum by (le) (rate(%s[%s]))), "service", "all", "", "")`, sel, w))
+	if err != nil {
+		return 0, false, err
+	}
+	v, ok := out["all"]
+	return v * 1000, ok, nil
+}
+
+var serviceLabelRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)

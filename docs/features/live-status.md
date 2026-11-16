@@ -133,3 +133,4 @@ data: {"target":"bus","from":"ok","status":"down","since":"2026-10-21T08:02:15Z"
 | 2026-10-21 | First version: targets file, http and tcp checks, hysteresis, SSE stream, status events through the outbox. |
 | 2026-10-30 | `/v1/health` and the stream need a token of an operator, owner or admin (synthwerk#40). |
 | 2026-11-16 | No change to the live status. Pulse also starts the alert engine and the AI usage consumer (synthwerk#57, alerts-and-cost.md). |
+| 2026-11-16 | Route `GET /v1/public-stats` without a token, uptime samples, completed answers per day (synthwerk#47, public-stats.md). |

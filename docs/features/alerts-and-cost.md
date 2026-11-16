@@ -135,3 +135,4 @@ Pulse sends no alert event yet. A later notification service can add one in synt
 | Date | Change |
 |---|---|
 | 2026-11-16 | First version: alerts, trace links and AI cost per day (synthwerk#57). |
+| 2026-11-16 | Route `GET /v1/public-stats` without a token, uptime samples, completed answers per day (synthwerk#47, public-stats.md). |

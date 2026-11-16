@@ -36,7 +36,7 @@ func TestParseAnswer(t *testing.T) {
 			t.Fatal(err)
 		}
 		if a.MessageID != "m-1" || a.Day.Format(time.DateOnly) != "2026-11-15" || a.OrgID != "org-a" ||
-			a.Provider != "anthropic" || a.Model != "default" || a.InputTokens != 10 || a.OutputTokens != 20 {
+			a.Provider != "anthropic" || a.Model != "default" || a.InputTokens != 10 || a.OutputTokens != 20 || !a.Completed {
 			t.Fatalf("got %+v", a)
 		}
 	})

@@ -126,3 +126,4 @@ updated: 2026-11-16
 |---|---|
 | 2026-10-30 | First version: token check on every `/v1` route, platform and org metrics (synthwerk#40). |
 | 2026-11-16 | `ai_cost` in both metrics answers, route `GET /v1/alerts` (synthwerk#57). |
+| 2026-11-16 | Route `GET /v1/public-stats` without a token, uptime samples, completed answers per day (synthwerk#47, public-stats.md). |

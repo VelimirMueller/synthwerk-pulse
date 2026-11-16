@@ -1,5 +1,6 @@
-// Package app wires pulse: health probes, the live status and metrics endpoints behind
-// the token check, the monitor, the metrics collector, the store and the outbox relay. It starts from the example service of the
+// Package app wires pulse: health probes, the live status, metrics and alerts endpoints
+// behind the token check, the monitor, the metrics collector, the alert engine, the AI
+// usage store, the store and the outbox relay. It starts from the example service of the
 // synthwerk-contracts Go kit (go/examples/service).
 package app
 
@@ -22,11 +23,13 @@ import (
 	kitlog "github.com/VelimirMueller/synthwerk-contracts/go/kit/log"
 	"github.com/VelimirMueller/synthwerk-contracts/go/kit/outbox"
 
+	"github.com/VelimirMueller/synthwerk-pulse/internal/alert"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/metrics"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/monitor"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/store"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/stream"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/target"
+	"github.com/VelimirMueller/synthwerk-pulse/internal/usage"
 )
 
 // Service is the short service name: env prefix SYNTHWERK_PULSE_, source /synthwerk/pulse/<env>.
@@ -44,8 +47,12 @@ type Config struct {
 	MonitorOptions []monitor.Option
 	// Verifier checks the Bearer token of every /v1 request. Required.
 	Verifier *auth.Verifier
-	// Metrics sources and timing. DB and JS are set by New.
+	// Metrics sources and timing. DB, JS and Cost are set by New.
 	Metrics metrics.Config
+	// Alerts: threshold, Tempo and trace link. Window, Interval and the sources are set by New.
+	Alerts alert.Config
+	// Prices of the AI cost. Zero value: usage.DefaultPrices.
+	Prices usage.Prices
 }
 
 // App holds the dependencies of the service.
@@ -59,11 +66,14 @@ type App struct {
 	Hub     *stream.Hub
 	Monitor *monitor.Monitor
 	Metrics *metrics.Collector
+	Alerts  *alert.Engine
+	Usage   *usage.Store
 	Relay   *outbox.Relay
 	handler http.Handler
 }
 
-// New wires the app. Call Migrate, then Health.MarkStarted, then run Monitor, Metrics and Relay.
+// New wires the app. Call Migrate, then Health.MarkStarted, then run Monitor, Metrics,
+// Alerts, RunUsage and Relay.
 func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App, error) {
 	if cfg.Verifier == nil {
 		return nil, errors.New("app: a token verifier is required")
@@ -100,14 +110,25 @@ func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App
 	st := store.New(db, source)
 	hub := stream.New(names, time.Now(), cfg.Stream)
 	mon := monitor.New(cfg.Targets, hub, st, logger, cfg.MonitorOptions...)
+	prices := cfg.Prices
+	if prices.Currency == "" {
+		prices = usage.DefaultPrices()
+	}
+	use := usage.NewStore(db, prices, cfg.Metrics.Now)
 	mcfg := cfg.Metrics
-	mcfg.DB, mcfg.JS = db, js
+	mcfg.DB, mcfg.JS, mcfg.Cost = db, js, use
 	col := metrics.New(mcfg, logger)
-	a := &App{DB: db, NC: nc, JS: js, Log: logger, Health: h, Store: st, Hub: hub, Monitor: mon, Metrics: col, Relay: relay}
+	acfg := cfg.Alerts
+	acfg.Window, acfg.Interval = cfg.Metrics.Window, cfg.Metrics.Interval
+	acfg.Targets = func() []stream.Target { return hub.Snapshot().Targets }
+	acfg.Prom, acfg.AI = cfg.Metrics.Prom, col.AI()
+	alerts := alert.New(acfg, logger)
+	a := &App{DB: db, NC: nc, JS: js, Log: logger, Health: h, Store: st, Hub: hub, Monitor: mon,
+		Metrics: col, Alerts: alerts, Usage: use, Relay: relay}
 
 	mux := http.NewServeMux()
 	h.Register(mux)
-	mux.Handle("/v1/", API(cfg.Verifier, hub, col))
+	mux.Handle("/v1/", API(cfg.Verifier, hub, col, alerts))
 	// The log line sits inside the span. Probes and the long-lived stream create no span.
 	a.handler = otelhttp.NewHandler(kitlog.HTTP(logger, mux), Service,
 		otelhttp.WithFilter(func(r *http.Request) bool {
@@ -126,10 +147,13 @@ func New(db *pgxpool.Pool, nc *nats.Conn, logger *slog.Logger, cfg Config) (*App
 //     org. The status of platform parts holds no org data.
 //   - GET /v1/metrics: operators only. The numbers cover every org.
 //   - GET /v1/orgs/{org}/metrics: the owners and admins of that org, or operators.
-func API(v *auth.Verifier, hub *stream.Hub, col *metrics.Collector) http.Handler {
+//   - GET /v1/alerts: operators and the owners and admins of any org. Only operators get
+//     the trace links (docs/features/alerts-and-cost.md).
+func API(v *auth.Verifier, hub *stream.Hub, col *metrics.Collector, alerts *alert.Engine) http.Handler {
 	viewer := auth.RequireRole(metrics.ViewerRoles...)
 	api := http.NewServeMux()
 	api.Handle("GET /v1/health", viewer(http.HandlerFunc(hub.ServeSnapshot)))
+	api.Handle("GET /v1/alerts", viewer(http.HandlerFunc(alerts.ServeAlerts)))
 	api.Handle("GET /v1/health/stream", viewer(http.HandlerFunc(hub.ServeStream)))
 	api.Handle("GET /v1/metrics", auth.RequireRole(auth.RoleOperator)(http.HandlerFunc(col.ServePlatform)))
 	api.HandleFunc("GET /v1/orgs/{org}/metrics", col.ServeOrg)
@@ -139,8 +163,19 @@ func API(v *auth.Verifier, hub *stream.Hub, col *metrics.Collector) http.Handler
 // Handler is the HTTP handler of the service.
 func (a *App) Handler() http.Handler { return a.handler }
 
-// Migrate creates the tables of pulse and of the outbox.
-func (a *App) Migrate(ctx context.Context) error { return a.Store.Migrate(ctx) }
+// Migrate creates the tables of pulse, of the AI usage and of the outbox.
+func (a *App) Migrate(ctx context.Context) error {
+	if err := a.Store.Migrate(ctx); err != nil {
+		return err
+	}
+	return a.Usage.Migrate(ctx)
+}
+
+// RunUsage counts the llm answers for the AI cost per day until ctx ends.
+func (a *App) RunUsage(ctx context.Context) error {
+	usage.Run(ctx, a.JS, a.Usage, a.Log, 15*time.Second)
+	return nil
+}
 
 // EnsureStream creates the stream EVT_PULSE when it is missing. Only for local runs
 // and tests: in a deployment the infra module owns the stream config.

@@ -366,7 +366,7 @@ func TestMetrics(t *testing.T) {
 	t.Run("AI - events on EVT_LLM - tokens and latency per org", func(t *testing.T) {
 		var org metrics.Org
 		for range 100 {
-			if org = a.Metrics.Org("org-a"); org.AI != nil && org.AI.Answers == 1 {
+			if org = a.Metrics.Org(t.Context(), "org-a"); org.AI != nil && org.AI.Answers == 1 {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)
@@ -380,7 +380,7 @@ func TestMetrics(t *testing.T) {
 		publish("org-a", 1000, 300)
 		var org metrics.Org
 		for range 100 {
-			if org = a.Metrics.Org("org-a"); org.AI.Answers == 2 {
+			if org = a.Metrics.Org(t.Context(), "org-a"); org.AI.Answers == 2 {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)

@@ -34,7 +34,7 @@ func (c *Collector) ServeOrg(w http.ResponseWriter, r *http.Request) {
 		forbidden(w)
 		return
 	}
-	writeJSON(w, c.Org(org))
+	writeJSON(w, c.Org(r.Context(), org))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -1,11 +1,14 @@
 package metrics_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -260,6 +263,108 @@ func TestCollector(t *testing.T) {
 		p := c.Platform()
 		if len(p.Services) != 1 || p.Services[0].Service != "llm" || p.Host == nil || p.Host.MemoryTotalBytes == 0 {
 			t.Fatalf("platform %+v, want llm and host numbers", p)
+		}
+	})
+}
+
+func TestTraceID(t *testing.T) {
+	cases := map[string]string{
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01": "4bf92f3577b34da6a3ce929d0e0e4736",
+		"00-00000000000000000000000000000000-00f067aa0ba902b7-01": "",
+		"00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01": "",
+		"ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01": "",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-01":                  "",
+		"":                                                        "",
+	}
+	for in, want := range cases {
+		t.Run("TraceID - "+in, func(t *testing.T) {
+			if got := metrics.TraceID(in); got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestEdgeCounts(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		queries []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("query")
+		mu.Lock()
+		queries = append(queries, q)
+		mu.Unlock()
+		v := "3"
+		if strings.Contains(q, `code=~"5.."`) {
+			v = "5" // more errors than requests: capped
+		}
+		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"service":"llm@file"},"value":[1,%q]}]}}`, v)
+	}))
+	t.Cleanup(srv.Close)
+	prom, err := metrics.NewPrometheus(srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("EdgeCounts - new 5xx series - counted from zero, errors at most requests", func(t *testing.T) {
+		got, err := prom.EdgeCounts(t.Context(), 5*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got["llm"] != (metrics.EdgeCount{Requests: 3, Errors: 3}) {
+			t.Fatalf("got %+v", got)
+		}
+		want := `sum by (service) (clamp_min(traefik_service_requests_total{code=~"5.."} - (traefik_service_requests_total{code=~"5.."} offset 300s or traefik_service_requests_total{code=~"5.."} * 0), 0))`
+		mu.Lock()
+		defer mu.Unlock()
+		if len(queries) != 2 || !slices.Contains(queries, want) {
+			t.Fatalf("queries %q", queries)
+		}
+	})
+}
+
+// costs is a fake cost source: org "broken" fails.
+type costs struct{ orgs []string }
+
+func (c *costs) Cost(_ context.Context, org string) (metrics.AICost, error) {
+	c.orgs = append(c.orgs, org)
+	if org == "broken" {
+		return metrics.AICost{}, errors.New("database down")
+	}
+	return metrics.AICost{Currency: "USD", Days: []metrics.CostDay{{Date: "2026-11-16", Cost: 1.5, Answers: 3}}}, nil
+}
+
+func TestAICost(t *testing.T) {
+	src := &costs{}
+	c := metrics.New(metrics.Config{Cost: src, Now: func() time.Time { return t0 }}, nil)
+
+	t.Run("Platform - cost source - ai_cost of every org", func(t *testing.T) {
+		c.Refresh(t.Context())
+		p := c.Platform()
+		if p.AICost == nil || p.AICost.Days[0].Cost != 1.5 || src.orgs[0] != "" {
+			t.Fatalf("ai_cost %+v, asked %q", p.AICost, src.orgs)
+		}
+	})
+
+	t.Run("Org - cost source - ai_cost of that org only", func(t *testing.T) {
+		o := c.Org(t.Context(), "org-a")
+		if o.AICost == nil || src.orgs[len(src.orgs)-1] != "org-a" {
+			t.Fatalf("ai_cost %+v, asked %q", o.AICost, src.orgs)
+		}
+	})
+
+	t.Run("Org - cost source fails - ai_cost null, AI numbers stay", func(t *testing.T) {
+		if o := c.Org(t.Context(), "broken"); o.AICost != nil || o.OrgID != "broken" {
+			t.Fatalf("org %+v", o)
+		}
+	})
+
+	t.Run("no cost source - ai_cost null", func(t *testing.T) {
+		n := metrics.New(metrics.Config{Now: func() time.Time { return t0 }}, nil)
+		n.Refresh(t.Context())
+		if n.Platform().AICost != nil || n.Org(t.Context(), "org-a").AICost != nil {
+			t.Fatal("ai_cost without a source")
 		}
 	})
 }

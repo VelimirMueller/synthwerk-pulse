@@ -11,6 +11,7 @@ import (
 	"github.com/VelimirMueller/synthwerk-contracts/go/kit/auth"
 	"github.com/VelimirMueller/synthwerk-contracts/go/kit/auth/authtest"
 
+	"github.com/VelimirMueller/synthwerk-pulse/internal/alert"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/app"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/metrics"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/stream"
@@ -51,7 +52,7 @@ func setup(t *testing.T) fixture {
 			t.Fatal(err)
 		}
 	}
-	srv := httptest.NewServer(app.API(v, hub, col))
+	srv := httptest.NewServer(app.API(v, hub, col, alert.New(alert.Config{}, nil)))
 	t.Cleanup(srv.Close)
 	t.Cleanup(hub.Close)
 	return fixture{srv: srv, iss: iss}
@@ -106,6 +107,10 @@ func TestScopePerRole(t *testing.T) {
 		{"org metrics - admin grant in another org - 403", "/v1/orgs/org-b/metrics", crossAdmin, http.StatusForbidden},
 		{"org metrics - member of the org - 403", "/v1/orgs/org-a/metrics", memberA, http.StatusForbidden},
 		{"org metrics - operator, any org - 200", "/v1/orgs/org-b/metrics", operator, http.StatusOK},
+		{"alerts - no token - 401", "/v1/alerts", "", http.StatusUnauthorized},
+		{"alerts - member - 403", "/v1/alerts", memberA, http.StatusForbidden},
+		{"alerts - org admin - 200", "/v1/alerts", adminA, http.StatusOK},
+		{"alerts - operator - 200", "/v1/alerts", operator, http.StatusOK},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

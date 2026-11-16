@@ -130,3 +130,35 @@ func (p *Prometheus) query(ctx context.Context, q string) (map[string]float64, e
 	}
 	return out, nil
 }
+
+// EdgeCount is the number of requests and of 5xx answers of one edge service in a window.
+type EdgeCount struct {
+	Requests float64
+	Errors   float64
+}
+
+// EdgeCounts returns the requests and 5xx answers per edge service in the last window.
+//
+// rate() needs two samples of a series, so the first 5xx of a service (a new series with
+// code 5xx) would count as zero. EdgeCounts takes the counter now minus the counter one
+// window back instead; a series that did not exist then counts from zero. A counter reset
+// gives zero, never a negative count.
+func (p *Prometheus) EdgeCounts(ctx context.Context, window time.Duration) (map[string]EdgeCount, error) {
+	w := strconv.Itoa(int(window.Seconds())) + "s"
+	delta := func(sel string) string {
+		return fmt.Sprintf(`sum by (service) (clamp_min(%[1]s - (%[1]s offset %[2]s or %[1]s * 0), 0))`, sel, w)
+	}
+	total, err := p.query(ctx, delta(edgeRequests))
+	if err != nil {
+		return nil, err
+	}
+	errs, err := p.query(ctx, delta(edgeRequests+`{code=~"5.."}`))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]EdgeCount, len(total))
+	for name, n := range total {
+		out[name] = EdgeCount{Requests: n, Errors: min(errs[name], n)}
+	}
+	return out, nil
+}

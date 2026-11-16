@@ -8,7 +8,7 @@ paths: ["cmd/pulse/**", "internal/**", "targets.example.yaml"]
 api: ["GET /v1/health", "GET /v1/health/stream", "GET /healthz", "GET /readyz"]
 events: ["dev.synthwerk.pulse.target.status_changed.v1"]
 mcp: []
-updated: 2026-10-30
+updated: 2026-11-16
 ---
 
 # Live status per service
@@ -132,3 +132,4 @@ data: {"target":"bus","from":"ok","status":"down","since":"2026-10-21T08:02:15Z"
 |---|---|
 | 2026-10-21 | First version: targets file, http and tcp checks, hysteresis, SSE stream, status events through the outbox. |
 | 2026-10-30 | `/v1/health` and the stream need a token of an operator, owner or admin (synthwerk#40). |
+| 2026-11-16 | No change to the live status. Pulse also starts the alert engine and the AI usage consumer (synthwerk#57, alerts-and-cost.md). |

@@ -5,6 +5,7 @@
 //   - host: CPU, memory and disk, from /proc and statfs
 //   - database connections (pg_stat_activity) and pending bus messages (JetStream)
 //   - tokens per minute and model latency, from llm.message.completed.v1 on EVT_LLM
+//   - the AI cost per day, from a CostSource (package usage, synthwerk#57)
 //
 // A Collector refreshes the platform numbers on one interval, so the load does not grow
 // with the number of viewers. The AI numbers are live from the events and can be read
@@ -32,6 +33,8 @@ type Platform struct {
 	Bus      *Bus      `json:"bus"`
 	// AI covers every org. Null while pulse does not read the llm stream.
 	AI *AI `json:"ai"`
+	// AICost covers every org. Null without a cost source or when it cannot be read.
+	AICost *AICost `json:"ai_cost"`
 }
 
 // Org is the body of GET /v1/orgs/{org}/metrics: the numbers of one org only.
@@ -40,6 +43,7 @@ type Org struct {
 	WindowSeconds int       `json:"window_seconds"`
 	OrgID         string    `json:"org_id"`
 	AI            *AI       `json:"ai"`
+	AICost        *AICost   `json:"ai_cost"`
 }
 
 // Config of a Collector. Nil sources give null parts.
@@ -53,7 +57,9 @@ type Config struct {
 	Prom     *Prometheus
 	Host     *HostSampler
 	AI       *AITracker
-	Now      func() time.Time
+	// Cost gives the AI cost per day. Nil: ai_cost is null.
+	Cost CostSource
+	Now  func() time.Time
 }
 
 // Collector is safe for concurrent use. Create it with New, then call Run once.
@@ -154,6 +160,15 @@ func (c *Collector) Refresh(ctx context.Context) {
 			return err
 		})
 	}
+	if c.cfg.Cost != nil {
+		run("ai_cost", func(ctx context.Context) error {
+			cost, err := c.cfg.Cost.Cost(ctx, "")
+			if err == nil {
+				next.AICost = &cost
+			}
+			return err
+		})
+	}
 	if c.cfg.JS != nil {
 		run("bus", func(ctx context.Context) error {
 			b, err := ReadBus(ctx, c.cfg.JS)
@@ -181,11 +196,24 @@ func (c *Collector) Platform() Platform {
 	return p
 }
 
-// Org returns the numbers of one org. It never reads data of another org.
-func (c *Collector) Org(orgID string) Org {
+// Org returns the numbers of one org. It never reads data of another org. The AI
+// cost is read at once, with the same timeout as one part of a refresh.
+func (c *Collector) Org(ctx context.Context, orgID string) Org {
 	o := Org{GeneratedAt: c.cfg.Now().UTC(), WindowSeconds: int(c.cfg.Window.Seconds()), OrgID: orgID}
 	if ai, ok := c.cfg.AI.Stats(orgID); ok {
 		o.AI = &ai
+	}
+	if c.cfg.Cost != nil && orgID != "" {
+		cctx, cancel := context.WithTimeout(ctx, min(c.cfg.Interval, 5*time.Second))
+		defer cancel()
+		if cost, err := c.cfg.Cost.Cost(cctx, orgID); err == nil {
+			o.AICost = &cost
+		} else if ctx.Err() == nil {
+			c.log.DebugContext(ctx, "metrics part not readable",
+				slog.String("event.name", "pulse.metrics.part_failed"),
+				slog.String("pulse.part", "ai_cost"),
+				slog.String("exception.message", err.Error()))
+		}
 	}
 	return o
 }

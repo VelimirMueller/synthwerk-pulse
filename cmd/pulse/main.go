@@ -22,7 +22,11 @@
 //	SYNTHWERK_PULSE_PROC_DIR             proc dir for host CPU and memory, default /proc
 //	SYNTHWERK_PULSE_DISK_PATH            path whose file system is the host disk, default /
 //	SYNTHWERK_PULSE_METRICS_WINDOW       window of rates, p95 and AI numbers, default 5m
-//	SYNTHWERK_PULSE_METRICS_INTERVAL     refresh of the platform numbers, default 10s
+//	SYNTHWERK_PULSE_METRICS_INTERVAL     refresh of the platform numbers and of the alerts, default 10s
+//	SYNTHWERK_PULSE_ALERT_ERROR_RATIO    share of 5xx answers or failed AI answers that raises an alert, default 0.05
+//	SYNTHWERK_PULSE_TEMPO_URL            Tempo API for the trace of an edge error, for example http://telemetry:3200. Empty = no such trace.
+//	SYNTHWERK_PULSE_TRACE_URL_TEMPLATE   trace link with {trace_id}, for example a Grafana Explore URL. Empty = no links.
+//	SYNTHWERK_PULSE_AI_PRICES_FILE       price table of the AI cost (YAML). Unset = USD, ollama and fake free, the rest unpriced.
 //	SYNTHWERK_PULSE_LOG_LEVEL            DEBUG, INFO (default), WARN, ERROR
 //	SYNTHWERK_PULSE_LOG_FORMAT           json (default) or console (local only)
 //	OTEL_EXPORTER_OTLP_ENDPOINT          collector (gRPC), for example http://telemetry:4317. Unset = no export.
@@ -55,10 +59,12 @@ import (
 	kitlog "github.com/VelimirMueller/synthwerk-contracts/go/kit/log"
 	kitotel "github.com/VelimirMueller/synthwerk-contracts/go/kit/otel"
 
+	"github.com/VelimirMueller/synthwerk-pulse/internal/alert"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/app"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/metrics"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/stream"
 	"github.com/VelimirMueller/synthwerk-pulse/internal/target"
+	"github.com/VelimirMueller/synthwerk-pulse/internal/usage"
 )
 
 // Set by -ldflags at build time.
@@ -175,6 +181,8 @@ func run(ctx context.Context) error {
 	g.Go(func() error { return a.Relay.Run(gctx) })
 	g.Go(func() error { return a.Monitor.Run(gctx) })
 	g.Go(func() error { return a.Metrics.Run(gctx) })
+	g.Go(func() error { return a.Alerts.Run(gctx) })
+	g.Go(func() error { return a.RunUsage(gctx) })
 	g.Go(func() error {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
@@ -217,6 +225,16 @@ func config(platform string) (app.Config, error) {
 	if err != nil {
 		return app.Config{}, err
 	}
+	acfg, err := alertConfig()
+	if err != nil {
+		return app.Config{}, err
+	}
+	prices := usage.DefaultPrices()
+	if path := env.Get(app.Service, "AI_PRICES_FILE", ""); path != "" {
+		if prices, err = usage.LoadPrices(path); err != nil {
+			return app.Config{}, err
+		}
+	}
 	return app.Config{
 		Version:  version,
 		Commit:   commit,
@@ -225,7 +243,28 @@ func config(platform string) (app.Config, error) {
 		Stream:   stream.Config{MaxClients: maxClients},
 		Verifier: verifier,
 		Metrics:  mcfg,
+		Alerts:   acfg,
+		Prices:   prices,
 	}, nil
+}
+
+func alertConfig() (alert.Config, error) {
+	var c alert.Config
+	ratio, err := strconv.ParseFloat(env.Get(app.Service, "ALERT_ERROR_RATIO", "0.05"), 64)
+	if err != nil || ratio <= 0 || ratio > 1 {
+		return c, errors.New(env.Key(app.Service, "ALERT_ERROR_RATIO") + " must be above 0 and at most 1")
+	}
+	c.ErrorRatio = ratio
+	if u := env.Get(app.Service, "TEMPO_URL", ""); u != "" {
+		if c.Tempo, err = alert.NewTempo(u, nil); err != nil {
+			return c, err
+		}
+	}
+	c.TraceURL = env.Get(app.Service, "TRACE_URL_TEMPLATE", "")
+	if err := alert.CheckTraceURL(c.TraceURL); err != nil {
+		return c, fmt.Errorf("%s: %w", env.Key(app.Service, "TRACE_URL_TEMPLATE"), err)
+	}
+	return c, nil
 }
 
 func verifierConfig() (*auth.Verifier, error) {

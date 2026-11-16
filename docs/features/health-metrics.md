@@ -5,10 +5,10 @@ status: beta
 epic: E4
 owner: pulse
 paths: ["internal/metrics/**", "internal/app/**", "cmd/pulse/**"]
-api: ["GET /v1/metrics", "GET /v1/orgs/{org}/metrics", "GET /v1/health", "GET /v1/health/stream"]
+api: ["GET /v1/metrics", "GET /v1/orgs/{org}/metrics", "GET /v1/health", "GET /v1/health/stream", "GET /v1/alerts"]
 events: ["dev.synthwerk.llm.message.completed.v1"]
 mcp: []
-updated: 2026-10-30
+updated: 2026-11-16
 ---
 
 # Health metrics and access per role
@@ -37,6 +37,7 @@ updated: 2026-10-30
 | `GET /v1/metrics` (every org) | 200 | 403 | 403 | 401 |
 | `GET /v1/orgs/{org}/metrics`, own org | 200 | 200 | 403 | 401 |
 | `GET /v1/orgs/{org}/metrics`, other org | 200 | 403 | 403 | 401 |
+| `GET /v1/alerts` (trace links for operators only) | 200 | 200 | 403 | 401 |
 
 - `operator` counts only when the grant is in `SYNTHWERK_PULSE_PLATFORM_ORG_ID`.
 - An owner or admin grant counts only in the org of the token.
@@ -77,6 +78,7 @@ updated: 2026-10-30
 | `host.cpu_ratio` | Busy share of all CPUs since the last refresh, 0 to 1. `null` on the first refresh. |
 | `bus.pending` | Per stream: not delivered plus not acked, summed over the consumers. |
 | `ai` | Every answer in the window. `latency_p95_ms` covers completed answers only. |
+| `ai_cost` | AI cost of the last 7 UTC days. See alerts-and-cost.md. `null` when pulse cannot read it. |
 
 ## Rules and limits
 
@@ -123,3 +125,4 @@ updated: 2026-10-30
 | Date | Change |
 |---|---|
 | 2026-10-30 | First version: token check on every `/v1` route, platform and org metrics (synthwerk#40). |
+| 2026-11-16 | `ai_cost` in both metrics answers, route `GET /v1/alerts` (synthwerk#57). |

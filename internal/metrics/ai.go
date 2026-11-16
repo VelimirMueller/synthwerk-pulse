@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ type sample struct {
 	tokens  int64
 	latency int64
 	status  string
+	traceID string // from the traceparent extension; empty when absent or not valid
 }
 
 // AITracker keeps the llm answers of the last window in memory. Safe for concurrent use.
@@ -67,9 +69,10 @@ func (t *AITracker) Window() time.Duration { return t.window }
 
 // event is the part of the CloudEvent pulse reads.
 type event struct {
-	Time  time.Time `json:"time"`
-	OrgID string    `json:"orgid"`
-	Data  struct {
+	Time        time.Time `json:"time"`
+	OrgID       string    `json:"orgid"`
+	TraceParent string    `json:"traceparent"`
+	Data        struct {
 		InputTokens  int64  `json:"input_tokens"`
 		OutputTokens int64  `json:"output_tokens"`
 		LatencyMs    int64  `json:"latency_ms"`
@@ -91,7 +94,7 @@ func (t *AITracker) Add(raw []byte) error {
 	defer t.mu.Unlock()
 	t.samples = append(t.samples, sample{
 		at: e.Time, org: e.OrgID, tokens: e.Data.InputTokens + e.Data.OutputTokens,
-		latency: e.Data.LatencyMs, status: e.Data.Status,
+		latency: e.Data.LatencyMs, status: e.Data.Status, traceID: TraceID(e.TraceParent),
 	})
 	t.trim()
 	return nil
@@ -158,6 +161,40 @@ func (t *AITracker) Stats(org string) (AI, bool) {
 		out.LatencyP95Ms = &p
 	}
 	return out, true
+}
+
+// LastFailedTrace returns the trace id of the newest failed answer in the window of
+// every org, or "" when there is none or it has no valid traceparent.
+func (t *AITracker) LastFailedTrace() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.trim()
+	var newest sample
+	for _, s := range t.samples {
+		if s.status == "failed" && s.traceID != "" && !s.at.Before(newest.at) {
+			newest = s
+		}
+	}
+	return newest.traceID
+}
+
+// TraceID returns the trace id of a W3C traceparent ("00-<32 hex>-<16 hex>-<2 hex>"),
+// or "" when the value is not valid. An all-zero id is not valid.
+func TraceID(traceparent string) string {
+	parts := strings.Split(traceparent, "-")
+	if len(parts) != 4 || len(parts[0]) != 2 || parts[0] == "ff" || len(parts[2]) != 16 || len(parts[3]) != 2 {
+		return ""
+	}
+	id := parts[1]
+	if len(id) != 32 || strings.Trim(id, "0") == "" {
+		return ""
+	}
+	for _, p := range []string{parts[0], id, parts[2], parts[3]} {
+		if strings.Trim(p, "0123456789abcdef") != "" {
+			return ""
+		}
+	}
+	return id
 }
 
 // percentile returns the nearest-rank percentile q (0 < q <= 1) of values.
